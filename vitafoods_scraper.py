@@ -7,6 +7,7 @@ import logging
 import data_cleaner
 from curl_cffi import requests as curl_requests
 from datetime import datetime
+
 # UI and Progress Monitoring Libraries
 from rich.console import Console
 from rich.panel import Panel
@@ -23,8 +24,12 @@ logging.basicConfig(
 
 
 class VitafoodsScraper:
+    """
+    Main extraction engine for the Vitafoods exhibitor directory.
+    Handles data fetching, localized backup, and profile scraping.
+    """
     def __init__(self):
-        # As variáveis moram aqui agora. Ninguém precisa "passar" nada.
+        """Initializes state variables and backup paths."""
         self.today = datetime.today().strftime('%Y-%m-%d')
         self.website_api = "https://exhibitors.vitafoods.eu.com/live/search/search_exhibition46json.jsp?site=47&eventid=598&eventid=598&types=all"
         self.master_dict = {}
@@ -32,13 +37,16 @@ class VitafoodsScraper:
         self.backup_file = f"backup_real_time_{self.today}.xlsx"
 
     def format_report(self):
+        """Formats the final Excel output via the external cleaner module."""
         df = pd.DataFrame(list(self.master_dict.values()))
-        data_cleaner.format_file(df,f"Vitafoods_exhibitors_{self.today}.xlsx" )
+        data_cleaner.format_file(df, f"Vitafoods_exhibitors_{self.today}.xlsx")
 
     def get_identificators(self, item):
+        """Extracts and sanitizes required identification data from the JSON payload."""
         raw_name = str(item.get("name", "N/A"))
         clean_name = raw_name.replace("xx", "'")
         emp_name = clean_name.upper().strip() 
+        
         if emp_name in self.processed_names:
             return None
         
@@ -47,6 +55,7 @@ class VitafoodsScraper:
         return path, emp_name, emp_id
 
     def resolve_json_response(self):
+        """Fetches the main directory list via HTTP request to the target API."""
         try:
             response = curl_requests.get(self.website_api, impersonate="chrome124")
             response.raise_for_status()
@@ -57,7 +66,6 @@ class VitafoodsScraper:
             return {}
         return json_file
 
-
     def format_id_path(self, emp_id):
         """
         Constructs the specific URL path by slicing the ID. 
@@ -67,20 +75,22 @@ class VitafoodsScraper:
         return f"{s[0:2]}/{s[2:4]}/{s[4:6]}"
 
     def final_dataframe(self):
-        # Final Export
+        """Generates the unformatted base Excel file as a final fallback."""
         final_df = pd.DataFrame(list(self.master_dict.values()))
         final_df.drop_duplicates(subset="Company Name", inplace=True)
         final_df.to_excel("Vitafoods_Exhibitors_2026_Final_Report.xlsx", index=False)   
 
     def save_data(self):
+        """Saves current progress to a local Excel backup file."""
         df = pd.DataFrame(list(self.master_dict.values()))
         df.to_excel(self.backup_file, index=False)
 
     def resolve_backup(self):
-        # Ela acessa direto do "self"
+        """Attempts to load previously saved data to resume scraping."""
         if not os.path.exists(self.backup_file):
             console.print(f"[bold yellow]⚠️ No valid backups available. Starting fresh.[/bold yellow]")
             return
+            
         try:
             df_existing = pd.read_excel(self.backup_file)
             # Identify entries that already have a valid Bio to avoid redundant processing
@@ -89,21 +99,24 @@ class VitafoodsScraper:
                 bio = str(row.get('Short Description', 'N/A'))
                 clean_row = row.to_dict()
                 self.master_dict[name] = clean_row
+                
                 if bio != "N/A" and len(bio) > 10:
                     self.processed_names.add(name)
-                console.print(f"[bold green]✅ Backup loaded: {len(self.processed_names)} results already completed.[/bold green]")
+                    
+            console.print(f"[bold green]✅ Backup loaded: {len(self.processed_names)} results already completed.[/bold green]")
         
         except Exception as e:
-            console.print(f"[bold red]❌ Erro ao ler o backup (Arquivo aberto ou corrompido): {e}[/bold red]")
-            console.print("[bold yellow]⚠️ Ignorando backup e começando do zero.[/bold yellow]")
+            console.print(f"[bold red]❌ Error reading backup (File open or corrupted): {e}[/bold red]")
+            console.print("[bold yellow]⚠️ Ignoring backup and starting from scratch.[/bold yellow]")
         
     def scrape_profile_data(self, page, detail_url, emp_name):
+        """Navigates to the specific profile page and extracts Stand Number and Description."""
         page.goto(detail_url, wait_until="domcontentloaded", timeout=25000)
         
-        # Extração de Localização e Bio (Igual ao seu)
         location = "N/A"
         if page.locator("span.stand").count() > 0:
             location = page.locator("span.stand").first.inner_text().strip()
+            
         desc_text = "N/A"
         if page.locator("div.additional").count() > 0:
             raw_desc = page.locator("div.additional").first.inner_text()
@@ -111,7 +124,6 @@ class VitafoodsScraper:
         elif page.locator(".description").count() > 0:
             desc_text = page.locator(".description").first.inner_text().strip()
 
-        # --- CORREÇÃO DA LÓGICA DE DICIONÁRIO ---
         repaired = emp_name in self.master_dict
         
         if not repaired:
@@ -125,6 +137,7 @@ class VitafoodsScraper:
         return desc_text, repaired, location
 
     def process_browser(self, records, results):
+        """Manages the browser lifecycle and iterates through the dataset for extraction."""
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -135,7 +148,7 @@ class VitafoodsScraper:
                 BarColumn(), TaskProgressColumn(), TimeRemainingColumn(), console=console
             ) as progress:
                 
-                main_task = progress.add_task("[cyan]Extracting & Repairing...", total=records)
+                main_task = progress.add_task("[cyan]Extracting & Processing...", total=records)
                 progress.update(main_task, completed=len(self.processed_names))
 
                 for item in results:
@@ -145,14 +158,13 @@ class VitafoodsScraper:
                     detail_url = f"https://exhibitors.vitafoods.eu.com/net/company/{path}/result{emp_id}-598.html"
                     
                     try:
-                        # --- CHAMADA CORRIGIDA (Sem passar master_dict) ---
                         desc, repaired, loc = self.scrape_profile_data(page, detail_url, emp_name) 
 
                         status = "[green]REPAIRED[/green]" if repaired else "[blue]NEW[/blue]"
                         preview = desc[:40].replace('\n', ' ') + "..."
                         progress.console.print(f"{status} | {emp_name[:20]:<20} | {loc:<12} | [dim]{preview}[/dim]")
 
-                        # Backup a cada 15
+                        # Create a backup every 15 records
                         if len(self.master_dict) % 15 == 0:
                             self.save_data()
 
@@ -169,35 +181,37 @@ class VitafoodsScraper:
 def main():
     engine = VitafoodsScraper()
 
-    # 1. Carrega os dados da API
+    # 1. Load API data
     data = engine.resolve_json_response()
     results = data.get("results", [])
     records = len(results)
 
-    # 2. Carrega o Backup (MUITO IMPORTANTE!)
+    # 2. Load backup data
     engine.resolve_backup()
 
-    # 3. Mostra o Painel Inicial para o usuário
+    # 3. Display control panel
     user_interaction(records, engine)
 
-    # 4. Inicia o Trabalho pesado
+    # 4. Start scraping process
     engine.process_browser(records, results)
 
-    # 5. Salva e Finaliza
+    # 5. Save and finalize output
     engine.final_dataframe()
     engine.format_report()
     display_result()
     
 
 def display_result():
-    # Dashboard display
+    """Displays the final completion dashboard."""
     console.print(Panel("[bold green]🏆 TASK COMPLETED: The finalized report has been generated.[/bold green]", expand=False))
 
+
 def user_interaction(records, engine):
+    """Renders the initial user interface console panel."""
     console.print(Panel.fit(
         f"[bold green]VITAFOODS 2026 - DATA EXTRACTION SYSTEM[/bold green]\n"
-        f"[blue]Total results Identified:[/blue] {records}\n"
-        f"[yellow]results with Valid Bio:[/yellow] {len(engine.processed_names)}\n"
+        f"[blue]Total Results Identified:[/blue] {records}\n"
+        f"[yellow]Results with Valid Data:[/yellow] {len(engine.processed_names)}\n"
         f"[dim]Logs stored in: extraction_errors.log[/dim]",
         title="Control Panel"
     ))
@@ -205,4 +219,3 @@ def user_interaction(records, engine):
 
 if __name__ == "__main__":
     main()
-
