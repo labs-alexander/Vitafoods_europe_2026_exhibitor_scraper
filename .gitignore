@@ -1,0 +1,12 @@
+# Python environment
+__pycache__/
+.venv/
+venv/
+
+# Project Data (Keep your local results private)
+*.xlsx
+*.log
+
+# IDE settings
+.vscode/
+.idea/
